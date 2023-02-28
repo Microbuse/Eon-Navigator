@@ -1,0 +1,157 @@
+import sys
+import requests
+import json
+from pandas import json_normalize
+import pandas as pd
+from datetime import datetime
+from time import sleep
+
+######################################
+# QuestDB settings
+HOST = 'http://grafana.doman.com:9000'
+
+"""Extract nested values from a JSON tree."""
+def json_extract(obj, key):
+    """Recursively fetch values from nested JSON."""
+    arr = []
+
+    def extract(obj, arr, key):
+        """Recursively search for values of key in JSON tree."""
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if isinstance(v, (dict, list)):
+                    extract(v, arr, key)
+                elif k == key:
+                    arr.append(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                extract(item, arr, key)
+        return arr
+
+    values = extract(obj, arr, key)
+    return values
+
+######## Set your login ########################################################
+client_id = "client_id=YourID"
+client_secret = "client_secret=YourSecret"
+grant_type = "grant_type=client_credentials"
+
+######## Api Url ########################################################
+baseUrl = "https://navigator-api.eon.se"
+tokenUrl = baseUrl +"/connect/token"
+measurementUrl = baseUrl +"/api/installations/measurement-series"
+installationsUrl = baseUrl +"/api/installations"
+measureUrl = baseUrl +"/api/measurements/"
+
+########  Get Bearer token ######################################################
+payload = (client_id+'&'+client_secret+'&'+grant_type)
+headers = {'content-type': "application/x-www-form-urlencoded",'cache-control': "no-cache",    }
+request = requests.post(tokenUrl, data=payload, headers=headers)
+response = json_extract(request.json(), 'access_token')
+access_token = (response[0])
+
+########  Set Header for Api with Bearer token ######################################################
+headersAPI = {'accept': 'application/json','Authorization': 'Bearer '+access_token,}
+params = (('offset', '0'),('limit', '20000'),)
+
+########  Show Measurement-series  information ######################################################
+request = requests.get(measurementUrl, headers=headersAPI, params=params, verify=True)
+api_response = request.json()
+
+########  Get your ID ######################################################
+response = json_extract(request.json(), 'id')
+id = (response[1])
+
+########  Show Installation information ######################################################
+request = requests.get(installationsUrl, headers=headersAPI, params=params, verify=True)
+api_response = request.json()
+
+########  Set Url for Api Get information ######################################################
+extractUrl = measureUrl + str(id)
+monthUrl = extractUrl + "/resolution/month"
+dayUrl = extractUrl + "/resolution/day"
+hourUrl = extractUrl + "/resolution/hour"
+querystring = {"from": "2019-01","includeMissing": "\"true\" -H \"accept: application/json\""}
+
+#### Get type of data ################
+active = monthUrl                ##### monthUrl, dayUrl, hourUrl ############
+params=params              ##### params, querystring ############
+cvsfile = 'data_month.csv'     ##### data_month.csv, data_day.csv, data_hour.csv ############
+
+def main_request(extractUrl, headers, params=None, verify=False): 
+        #using requests to call API data 
+        r = requests.get(extractUrl, headers=headers, params=params) 
+        #returning data in json format 
+        return r.json() 
+########  Get data main function ###############################################################################################
+if __name__ == '__main__':
+    try:
+        while 1==1:
+########  Get data from the API variable calling main function ##################################################################
+            data = main_request(active, headers=headersAPI, params=params, verify=True)
+######## creating a dataframe using pandas ######################################################################################
+            data_DF = pd.DataFrame(data)
+######## adding a column called index to dataframe ##############################################################################
+            data_DF['index'] = range(0,len(data_DF))
+######## creating a different dataframe for the nested column ###################################################################
+            measurements_DF = pd.concat([pd.DataFrame(json_normalize(x)) for x in data_DF['measurements']],sort=False)
+######## creating a new column called index #####################################################################################
+            measurements_DF['index'] = range(0, len(measurements_DF))
+######## Merge on Index #########################################################################################################
+            merged_df = pd.merge(data_DF,measurements_DF,on="index")
+######## Drop 'id','resolution', 'measurements' columns from the dataframe ######################################################
+            merged_df = merged_df.drop(['id'], axis=1) 
+            merged_df = merged_df.drop(['resolution'], axis=1)
+            merged_df = merged_df.drop(['measurements'], axis=1)
+######## Data1 ##################################################################################################################
+            data1 = (merged_df['timeStamp'])
+            data1 = pd.DataFrame(data1)
+            data1['index'] = range(0, len(data1))
+######## Data2 ##################################################################################################################
+            data2 = (merged_df['value'])
+            data2 = pd.DataFrame(data2)
+            data2['index'] = range(0, len(data2))
+######## Merge Data1 and Data1 to Data ##########################################################################################
+            data = pd.merge(data1 , + data2,on="index",)
+########  drop index column from the dataframe ##################################################################################
+            data = data.drop('index', axis=1)
+########  Renaming the column names to include company_ prefix ##################################################################
+            data.rename(columns={'timeStamp': 'Date', 'value': 'kWh'}, inplace=True)
+########  convert Date column to datetime format ################################################################################
+            data['Date'] = pd.DataFrame(data["Date"])
+            data['Date'] = pd.to_datetime(data['Date'], format='%Y-%m-%d') + pd.to_timedelta('00:00:01')
+########  set Date as index #####################################################################################################
+            indexed_data = data.set_index(["Date"], drop=True)
+            indexed_data.head()
+########  Set what information to save ###########################################################################################
+            data_csv = pd.DataFrame(indexed_data)
+            data_csv.to_csv(cvsfile)
+########  Set what information to send ###########################################################################################
+            def run_query(sql_query):
+              query_params = {'query': sql_query, 'fmt' : 'json'}
+              try:
+                response = requests.get(HOST + '/exec', params=query_params)
+                json_response = json.loads(response.text)
+                print(json_response)
+              except requests.exceptions.RequestException as e:
+                print("Error: %s" % (e))
+########  drop table ##############################################################################################################
+            run_query("drop table 'Eon_month'")
+########  create table ############################################################################################################
+            run_query("CREATE TABLE IF NOT EXISTS Eon_month (Date TIMESTAMP, kWh DOUBLE)")
+########  insert row ##############################################################################################################
+#            run_query("INSERT INTO Eon_month VALUES('abc', 123456)")
+########  update row ##############################################################################################################
+#            run_query("UPDATE Eon_month SET value = 9876 WHERE name = 'abc'")
+########  Imports the CSV every time post, put, patch #############################################################################       
+            csv = {'data': ('Eon_month', open(cvsfile, 'r'))}     
+            try:
+                response = requests.post(HOST + '/imp', files=csv)
+                response.raise_for_status()
+                print(response)
+                break
+            except requests.exceptions.RequestException as e:
+                print(f'Error: {e}', file=sys.stderr)
+########  Exception ###############################################################################################################
+    except Exception as e:
+        print(e)
